@@ -1,0 +1,8 @@
+kaggle.json
+.kaggle/
+*.csv
+*.gz
+.ipynb_checkpoints/
+.venv/
+__pycache__/
+.DS_Store
