@@ -8,9 +8,10 @@ Built as the final project for INET 4061 at the University of Minnesota.
 
 The full notebook with all outputs is [`ctr_analysis.ipynb`](ctr_analysis.ipynb).
 
-> **Read before using the model scores.** One engineered feature leaks the target, so the model scores in this
-> notebook are inflated. The exploratory analysis, the hypothesis test, and the clustering are unaffected.
-> See [Target leakage](#target-leakage-in-the-model-results).
+> **About the model scores.** The notebook's model scores (R² 0.996, ROC-AUC 0.999) come from a feature that
+> leaks the target. [`rerun_without_leak.py`](rerun_without_leak.py) reproduces the notebook and re-runs every model
+> without it: the honest result is **ROC-AUC 0.66 (5-fold CV)** for flagging above-median CTR, and almost no skill at
+> predicting the exact CTR. See [Target leakage](#target-leakage-found-and-corrected).
 
 ## Business question
 
@@ -78,6 +79,8 @@ often, which would make exposure a result of CTR, not a cause of it. This data c
 Data split 80/20 (952 train, 239 test). Each model family was fit for both targets, and XGBoost was tuned with
 `RandomizedSearchCV` (3-fold) and then checked with 5-fold cross-validation.
 
+### Notebook results (leaked, kept for reference)
+
 | Regression (CTR) | MAE | RMSE | R² |
 |---|---|---|---|
 | Linear Regression | 0.0456 | 0.0724 | 0.756 |
@@ -99,7 +102,7 @@ F1 0.992.
 
 ![Confusion matrix and ROC curves](images/confusion_roc.png)
 
-### Target leakage in the model results
+### Target leakage, found and corrected
 
 These scores are too good for CTR prediction, and the feature importances show why:
 
@@ -107,18 +110,47 @@ These scores are too good for CTR prediction, and the feature importances show w
 
 `item_ctr_rank` carries **98.3%** of the importance. It is the percentile rank of each site/app's median CTR,
 computed over the whole dataset before the train/test split. Each site/app has 1.01 creatives on average, so that
-median is almost always the creative's own CTR, and the feature gives the target to the model. Every other feature
-together accounts for under 2%.
+median is almost always the creative's own CTR, and the feature gives the target to the model.
 
-What this means:
+[`rerun_without_leak.py`](rerun_without_leak.py) rebuilds the notebook's pipeline from `train.gz` with the same rows,
+features, split, models, search space, and seeds. It first reproduces the leaked results (linear and logistic
+regression match to four decimals; tree models match within XGBoost version differences), then repeats every model
+without `item_ctr_rank` and adds a naive baseline. Full output: [`results/rerun_results.md`](results/rerun_results.md).
 
-- The regression, classification, and cross-validation scores above measure leakage, not predictive skill.
-- `dow` and `is_weekend` have zero importance because the 500,000 rows all fall on one day (2014-10-21).
-- The exploratory analysis, the Mann-Whitney test, and the clustering below do not use `item_ctr_rank` as a model
-  input and still hold.
+### Corrected results (without `item_ctr_rank`)
 
-The fix is to drop `item_ctr_rank`, or to compute it out-of-fold from training rows only, and to load several days of
-data so time features vary. That rerun is the next step for this repo.
+| Regression (CTR) | MAE | RMSE | R² |
+|---|---|---|---|
+| Baseline (training mean) | 0.108 | 0.147 | 0.000 |
+| Linear Regression | 0.103 | 0.145 | 0.021 |
+| Random Forest | 0.105 | 0.149 | -0.026 |
+| XGBoost | 0.105 | 0.147 | -0.008 |
+| XGBoost (tuned) | 0.104 | 0.145 | 0.017 |
+
+| Classification (high vs low CTR) | Accuracy | F1 | ROC-AUC |
+|---|---|---|---|
+| Baseline (majority class) | 0.485 | 0.000 | 0.500 |
+| Logistic Regression | 0.573 | 0.592 | 0.604 |
+| Random Forest | 0.577 | 0.598 | 0.621 |
+| XGBoost | 0.577 | 0.574 | 0.617 |
+| XGBoost (tuned) | 0.603 | 0.585 | 0.625 |
+
+5-fold CV for tuned XGBoost: regression R² 0.039 ± 0.017; classification **ROC-AUC 0.662 ± 0.040**, F1 0.586.
+
+What the honest numbers say:
+
+- **Predicting exact CTR does not work with these features.** Every regressor lands within 0.003 RMSE of predicting
+  the training mean.
+- **Ranking creatives as above or below median CTR works a little.** ROC-AUC of 0.62–0.66 beats chance (0.50) by a
+  real margin, so the model can order creatives better than random, but it is far from reliable on its own.
+- **Exposure is the main signal.** With the leak gone, `log_pv` carries 61% of the importance, followed by device
+  type, connection type, and app vs site.
+
+![Feature importance without the leaked feature](images/feature_importance_no_leak.png)
+
+- `dow` and `is_weekend` still have zero importance because the 500,000 rows all fall on one day (2014-10-21).
+  Loading several days, and adding Avazu's anonymized C14–C21 fields and site/app categories as encoded features,
+  are the next steps for a better model.
 
 ## Creative segmentation (K-Means)
 
@@ -144,8 +176,9 @@ too, though, so the right move is to give them more impressions as a test before
 1. CTR is concentrated: a small share of creatives earn most clicks, so ranking creatives matters more than tuning the
    average.
 2. Highly exposed creatives have a modestly higher CTR (p = 0.027), but rank correlation with exposure is near zero.
-3. Placement and device features alone explain little; the model results are driven by a leaked feature and should
-   not be used as a performance estimate.
+3. After removing a leaked feature, placement, device, and exposure features rank creatives above or below median
+   CTR at ROC-AUC 0.66 (5-fold CV) and cannot predict exact CTR (R² 0.04). The notebook's near-perfect scores were
+   leakage.
 4. Segmentation finds a clear group of low-traffic, high-CTR creatives worth testing with more budget.
 
 ## Limitations
@@ -155,6 +188,7 @@ too, though, so the right move is to give them more impressions as a test before
 - CTR on creatives with 10–50 impressions is noisy; a Bayesian or Wilson-interval adjustment would make rankings
   more stable.
 - Exposure is not randomly assigned, so the hypothesis test shows association, not cause.
+- The clustering uses CTR itself as an input, so its segments describe past performance; they are not a forecast.
 
 ## Running it
 
@@ -167,3 +201,10 @@ jupyter notebook ctr_analysis.ipynb   # update the CSV path in the data-loading 
 ```
 
 The notebook was written for Google Colab and reads `/content/train.csv`.
+
+To reproduce the leaked and corrected model results from the command line (needs `tabulate` for the Markdown tables;
+on macOS, XGBoost also needs `brew install libomp`):
+
+```bash
+python rerun_without_leak.py train.gz
+```
